@@ -22,6 +22,19 @@ module.exports = function callRoutes({ discord, phone, bridge, session, urls, rt
         return respond(res, errorPage(urls, 'Error', 'No channel specified'));
       }
 
+      /*
+       * The phone can reach /join while a call is already up -- Back to Menu,
+       * pick another channel -- and nothing here used to notice. That left the
+       * first phone stream orphaned, because its id was overwritten in the
+       * session and stopMedia needs it, and VoiceSession replaced its
+       * connection without destroying the old one, leaking an audio player and
+       * a second encoder onto the same PCM stream.
+       */
+      if (session.active) {
+        console.log(`[Join] Replacing the call in progress (${session.channelName})`);
+        await endSession({ session, phone, discord, bridge });
+      }
+
       const channel = await discord.getChannel(id);
       const channelName = describeChannel(channel, type);
       const targetGuildId = type === 'server' ? guildId || channel?.guild?.id : null;
@@ -87,20 +100,45 @@ module.exports = function callRoutes({ discord, phone, bridge, session, urls, rt
     if (!session.active) return;
 
     const { channelName } = session;
-    session.reset();
 
-    try {
-      discord.leaveVoiceChannel();
-      bridge.restart();
-      await phone.clearDisplay();
-      console.log(`[Stopped] Cleaned up after ${channelName}`);
-    } catch (e) {
-      console.error('[Stopped] Cleanup error:', e.message);
-    }
+    // The handset has already hung up, so its own stream is gone; only the
+    // Discord side and the display need attention.
+    await endSession({ session, phone, discord, bridge, stopMedia: false });
+    await phone.clearDisplay().catch((e) => console.error('[Stopped]', e.message));
+    console.log(`[Stopped] Cleaned up after ${channelName}`);
   });
 
   return router;
 };
+
+/**
+ * Tear the current call down, leaving nothing running.
+ *
+ * Order matters: the session is cleared first so a concurrent request cannot
+ * act on a half-dismantled call, and each step is allowed to fail without
+ * stranding the ones after it.
+ *
+ * @param {{stopMedia?: boolean}} options pass false when the phone has already
+ *        hung up and its stream no longer exists.
+ */
+async function endSession({ session, phone, discord, bridge, stopMedia = true }) {
+  const { streamId } = session;
+  session.reset();
+
+  if (stopMedia && streamId) {
+    await phone.stopMedia(streamId).catch((e) => console.error('[EndSession] stopMedia:', e.message));
+  }
+
+  try {
+    discord.leaveVoiceChannel();
+  } catch (e) {
+    console.error('[EndSession] leaveVoiceChannel:', e.message);
+  }
+
+  // A closed UDP socket cannot be rebound and an ended stream will not accept
+  // writes, so the audio components are replaced rather than reused.
+  bridge.restart();
+}
 
 /** A label for whatever kind of channel this is. */
 function describeChannel(channel, type) {

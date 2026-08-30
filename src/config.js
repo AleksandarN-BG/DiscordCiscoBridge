@@ -63,6 +63,18 @@ const config = {
     // The phone fetches menus from this, so it must be an address the phone can
     // reach -- not localhost. Derived from BRIDGE_IP unless overridden.
     publicUrl: optional('HTTP_PUBLIC_URL', `http://${bridgeIp}:${httpPort}`),
+
+    /*
+     * Extra addresses allowed to reach the XML service, comma separated.
+     * The phone's own address and loopback are always allowed; everything
+     * else is refused, because these routes have no authentication and list
+     * the Discord account's private conversations. Add a workstation here
+     * only while testing.
+     */
+    allowedClients: optional('HTTP_ALLOWED_CLIENTS', '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
 };
 

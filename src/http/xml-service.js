@@ -6,6 +6,7 @@
 
 const express = require('express');
 const { buildUrls } = require('./urls');
+const { clientAllowlist } = require('./allowlist');
 const CallSession = require('./session');
 const browseRoutes = require('./routes/browse');
 const callRoutes = require('./routes/call');
@@ -13,9 +14,9 @@ const statusRoutes = require('./routes/status');
 
 class XmlService {
   /**
-   * @param {{http: {host: string, port: number, publicUrl: string}, rtp: {bridgeIp: string, listenPort: number}, discord: object, phone: object, bridge: object}} deps
+   * @param {{http: {host: string, port: number, publicUrl: string, allowedClients?: string[]}, rtp: {bridgeIp: string, listenPort: number}, phoneIp: string, discord: object, phone: object, bridge: object}} deps
    */
-  constructor({ http, rtp, discord, phone, bridge }) {
+  constructor({ http, rtp, discord, phone, bridge, phoneIp }) {
     this.http = http;
     this.phone = phone;
     this.session = new CallSession();
@@ -25,6 +26,10 @@ class XmlService {
     const { session } = this;
 
     this.app = express();
+
+    // Before anything else: only the handset may reach these routes.
+    this.app.use(clientAllowlist({ phoneIp, extra: http.allowedClients }));
+
     this.app.use(browseRoutes({ discord, urls }));
     this.app.use(callRoutes({ discord, phone, bridge, session, urls, rtp }));
     this.app.use(statusRoutes({ session, urls }));

@@ -30,6 +30,7 @@ async function main() {
   const xmlService = new XmlService({
     http: config.http,
     rtp: config.rtp,
+    phoneIp: config.phone.ip,
     discord,
     phone,
     bridge,

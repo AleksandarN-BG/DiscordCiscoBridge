@@ -20,6 +20,7 @@ const { RtpPacketizer, HEADER_BYTES } = require('../src/audio/rtp-packet');
 const { paginate, pageLinks } = require('../src/http/pagination');
 const { buildUrls } = require('../src/http/urls');
 const CallSession = require('../src/http/session');
+const { clientAllowlist, normalise } = require('../src/http/allowlist');
 const XmlService = require('../src/http/xml-service');
 
 test('xml escapes exactly once', () => {
@@ -157,6 +158,7 @@ test('every route answers with parseable XML', async () => {
   const service = new XmlService({
     http: { host: '127.0.0.1', port: 18099, publicUrl: 'http://127.0.0.1:18099' },
     rtp: { bridgeIp: '192.0.2.10', listenPort: 20480 },
+    phoneIp: '127.0.0.1',
     discord: stubDiscord(),
     phone: { startMedia: async () => 's1', stopMedia: async () => {}, clearDisplay: async () => {} },
     bridge: { restart() {}, getDiscordInputStream: () => null },
@@ -214,3 +216,70 @@ function stubDiscord() {
     leaveVoiceChannel() {},
   };
 }
+
+test('only the handset and loopback may reach the service', () => {
+  // These routes have no authentication: /dms lists the account's private
+  // conversations and /join makes it join a call. The address is the check.
+  const middleware = clientAllowlist({ phoneIp: '192.0.2.20', extra: ['192.0.2.99'] });
+
+  const attempt = (remoteAddress) => {
+    let status = null;
+    let passed = false;
+    const res = {
+      status(code) { status = code; return this; },
+      type() { return this; },
+      send() {},
+    };
+    middleware({ socket: { remoteAddress }, url: '/dms' }, res, () => { passed = true; });
+    return { passed, status };
+  };
+
+  assert.equal(attempt('192.0.2.20').passed, true, 'the phone is allowed');
+  assert.equal(attempt('::ffff:192.0.2.20').passed, true, 'IPv4-mapped form is the same address');
+  assert.equal(attempt('192.0.2.99').passed, true, 'an explicitly configured client is allowed');
+  assert.equal(attempt('127.0.0.1').passed, true, 'loopback is allowed');
+
+  assert.equal(attempt('192.0.2.77').passed, false, 'another LAN host is refused');
+  assert.equal(attempt('192.0.2.77').status, 403);
+  assert.equal(attempt(undefined).passed, false, 'an unknown source is refused');
+  assert.equal(normalise('::ffff:10.0.0.1'), '10.0.0.1');
+});
+
+test('joining while already connected replaces the call instead of orphaning it', async () => {
+  const stopped = [];
+  let nextStreamId = 1;
+
+  const service = new XmlService({
+    http: { host: '127.0.0.1', port: 18098, publicUrl: 'http://127.0.0.1:18098' },
+    rtp: { bridgeIp: '192.0.2.10', listenPort: 20480 },
+    phoneIp: '127.0.0.1',
+    discord: stubDiscord(),
+    phone: {
+      startMedia: async () => `stream-${nextStreamId++}`,
+      stopMedia: async (id) => { stopped.push(id); },
+      clearDisplay: async () => {},
+    },
+    bridge: { restart() {}, getDiscordInputStream: () => null },
+  });
+
+  service.start();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  try {
+    const join = (id) => fetch(`http://127.0.0.1:18098/join?type=server&id=${id}&guildId=g0`);
+
+    await join('v0');
+    assert.equal(service.session.streamId, 'stream-1');
+    assert.deepEqual(stopped, [], 'nothing to stop on the first join');
+
+    // Reachable from the phone: Back to Menu, then pick a different channel.
+    await join('v1');
+
+    // Without the fix, stream-1 was overwritten and could never be stopped.
+    assert.deepEqual(stopped, ['stream-1'], 'the previous phone stream is closed');
+    assert.equal(service.session.streamId, 'stream-2');
+    assert.equal(service.session.active, true);
+  } finally {
+    await service.stop();
+  }
+});

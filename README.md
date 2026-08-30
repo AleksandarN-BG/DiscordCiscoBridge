@@ -33,8 +33,9 @@ This project bridges Discord voice channels and Cisco IP phones (CP-8845+) using
    - Phone web UI → Security → HTTP Authentication
    - Set username/password to match `PHONE_USERNAME` / `PHONE_PASSWORD`
 5. **Network:**
-   - Open/forward UDP port 20480 (or as configured)
-   - Allow TCP 8080 for HTTP service
+   - Allow UDP `RTP_LISTEN_PORT` (default 20480) and TCP `HTTP_PORT` (default
+     8080) **between the phone and the bridge only**. Do not forward either
+     from the internet -- see [Security](#security).
 6. **Install Dependencies:**
    - `npm install`
    - npm may report that `@discordjs/opus` has a blocked install script. That
@@ -62,6 +63,7 @@ All configuration comes from environment variables, read from `.env` at startup.
 | `RTP_LISTEN_PORT` | no | Default `20480` |
 | `HTTP_HOST` | no | Default `0.0.0.0` |
 | `HTTP_PORT` | no | Default `8080` |
+| `HTTP_ALLOWED_CLIENTS` | no | Extra addresses allowed to reach the XML service, comma separated. `PHONE_IP` and loopback are always allowed; everything else is refused. |
 | `HTTP_PUBLIC_URL` | no | Defaults to `http://$BRIDGE_IP:$HTTP_PORT`. The phone fetches its menus from this, so it must be reachable from the phone. |
 
 Start-up fails with a list of anything missing rather than erroring obscurely
@@ -96,6 +98,7 @@ src/
 
   http/                 the menus the phone renders
     xml-service.js      assembles the app, owns its lifecycle
+    allowlist.js        refuses anything that is not the handset
     session.js          the one call that can be in progress
     urls.js             every route the phone can be sent to
     pagination.js       slicing lists into pages a phone can show (pure)
@@ -161,13 +164,47 @@ over every HTTP route with Discord and the phone stubbed out. The RTP, Opus and
 Discord transports themselves need a real handset and a real account.
 
 ## Network Requirements
-- Bridge and phone must be on the same LAN or have proper port forwarding
-- UDP port (default 20480) open between phone and bridge
-- TCP port 8080 open for XML service
 
-## Legal & ToS Warning
-- **Discord self-bots are against Discord ToS.**
-- Use at your own risk. For personal/proof-of-concept use only.
+- The phone and the bridge must be able to reach each other directly. Put them
+  on the same LAN segment.
+- UDP `RTP_LISTEN_PORT` (default 20480) open between phone and bridge, in both
+  directions. The phone has to send first: its return address is discovered
+  from the source of its own RTP.
+- TCP `HTTP_PORT` (default 8080) reachable from the phone.
+- `HTTP_PUBLIC_URL` must be an address the phone can resolve. Not `localhost`,
+  not `0.0.0.0`.
+
+**Do not port-forward either of these.** See below.
+
+## Security
+
+Two things about this project are worth understanding before running it.
+
+**The XML service has no authentication, and cannot easily have any.** A Cisco
+phone fetching an XML service is not a browser; it has no useful credential
+store. The endpoints are not harmless:
+
+| route | what it gives a caller |
+| --- | --- |
+| `/dms` | the account's private conversations, by name, most recent first |
+| `/servers`, `/server-channels` | its guilds and their voice channels |
+| `/preview` | who is currently in a voice channel |
+| `/join` | makes the account join a call, and pipes the handset's audio in |
+
+Because only one device is ever a legitimate client, and its address is already
+configured, the address is the check: `src/http/allowlist.js` refuses every
+request that does not come from `PHONE_IP` (or loopback, or an address named in
+`HTTP_ALLOWED_CLIENTS`). It runs before any route.
+
+That is a segment-level control, not authentication. Anyone who can spoof a
+source address on the LAN, or who takes the phone's address, gets through. Keep
+the port on a network you trust and do not expose it.
+
+**It signs in as a user account, not a bot.** Discord bots cannot be placed in
+a DM call, which is half of what this exists to do, so there is no bot-token
+version of this project. That is against Discord's terms of service and the
+token grants full access to the account -- not a scoped permission. Treat
+`.env` accordingly, and expect that the account could be terminated.
 
 ## Troubleshooting
 
