@@ -37,6 +37,10 @@ This project bridges Discord voice channels and Cisco IP phones (CP-8845+) using
    - Allow TCP 8080 for HTTP service
 6. **Install Dependencies:**
    - `npm install`
+   - npm may report that `@discordjs/opus` has a blocked install script. That
+     script fetches its prebuilt binary. Approve it with
+     `npm install-scripts approve @discordjs/opus && npm rebuild @discordjs/opus`,
+     or skip it -- see [Opus backend](#opus-backend) below.
 7. **Configure:**
    - `cp .env.example .env`, then fill it in
 8. **Run:**
@@ -124,6 +128,26 @@ RTP header, and paces it out to the handset.
 
 The RTP framing is written by hand rather than delegated to FFmpeg's `-f rtp`,
 which gives up control of the send cadence. A handset notices a burst.
+
+## Opus backend
+
+`prism-media` needs an Opus codec and tries, in order, `@discordjs/opus`, then
+`opusscript`. Both are installed:
+
+| | | |
+| --- | --- | --- |
+| `@discordjs/opus` | native | 0.36% of the real-time budget for one stream |
+| `opusscript` | pure JavaScript | 0.61%, and needs no compiler |
+
+The native one is preferred, and the pure-JS one carries the call if it is not
+built -- a blocked install script, a missing compiler, a fresh clone on another
+machine. Either way the encoder produces byte-identical output, because both
+wrap the same libopus.
+
+`node-opus` was the original backend and has been removed: it is a `nan` addon
+last published in 2019, and Node 26's V8 no longer has the
+`GetAlignedPointerFromInternalField` overload it compiles against. It cannot be
+built on a current runtime at all.
 
 ## Tests
 
