@@ -1,0 +1,16 @@
+# Secrets. .env holds the Discord user token and the phone password.
+.env
+.env.local
+config.json
+
+node_modules/
+
+# Logs and runtime noise
+*.log
+npm-debug.log*
+.output.txt
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

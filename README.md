@@ -1,0 +1,164 @@
+# Discord-to-Cisco RTP Bridge
+
+## Overview
+This project bridges Discord voice channels and Cisco IP phones (CP-8845+) using the Cisco RTP Streaming API and a Discord self-bot. It enables a Cisco phone to join Discord voice channels via an interactive phone menu, with real-time audio bridging.
+
+**WARNING:** This project uses a Discord self-bot (user account). Self-bots are against Discord's Terms of Service and may result in account termination. Use for personal/proof-of-concept purposes only.
+
+## Features
+- Cisco phone XML menu for Discord channel selection
+- Direct RTP audio streaming (G.711) between phone and bridge
+- Real-time audio transcoding (G.711 ↔ Opus)
+- Discord voice channel join/leave via phone
+- Status and control endpoints
+
+## Requirements
+- Cisco CP-8845 (firmware 10.3(2)+)
+- Node.js 18+
+- Discord user account (for self-bot)
+- Network access between phone and bridge
+
+## Setup
+1. **Check Phone Firmware:**
+   - Access phone web UI → Device Information → Firmware Version (must be 10.3(2)+)
+2. **Obtain Discord User Token:**
+   - Use browser dev tools (see Discord self-bot guides online)
+   - **Never share your token.** It grants full access to the account, not a
+     scoped bot permission. It belongs in `.env`, which is gitignored.
+3. **Add XML Service to Phone:**
+   - Phone web UI → Device → Phone Services → Add new service
+   - Name: DiscordBridge, URL: `http://<bridge-ip>:8080/discord-menu`
+   - Or via CUCM: Device → Phone → Add Service URL
+4. **Configure Phone HTTP Credentials:**
+   - Phone web UI → Security → HTTP Authentication
+   - Set username/password to match `PHONE_USERNAME` / `PHONE_PASSWORD`
+5. **Network:**
+   - Open/forward UDP port 20480 (or as configured)
+   - Allow TCP 8080 for HTTP service
+6. **Install Dependencies:**
+   - `npm install`
+7. **Configure:**
+   - `cp .env.example .env`, then fill it in
+8. **Run:**
+   - `npm start`, or `npm test` to check the parts that need no hardware
+
+## Configuration
+
+All configuration comes from environment variables, read from `.env` at startup.
+`.env` is gitignored; `.env.example` documents the shape and is safe to commit.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DISCORD_USER_TOKEN` | yes | Self-bot token. Full account access -- treat as a password. |
+| `DISCORD_GUILD_ID` | no | Restrict to one guild. Blank allows all. |
+| `PHONE_IP` | yes | Cisco phone address |
+| `PHONE_USERNAME` | yes | Phone HTTP auth |
+| `PHONE_PASSWORD` | yes | Phone HTTP auth |
+| `BRIDGE_IP` | yes | This host, as the phone sees it. Not `localhost`. |
+| `RTP_LISTEN_PORT` | no | Default `20480` |
+| `HTTP_HOST` | no | Default `0.0.0.0` |
+| `HTTP_PORT` | no | Default `8080` |
+| `HTTP_PUBLIC_URL` | no | Defaults to `http://$BRIDGE_IP:$HTTP_PORT`. The phone fetches its menus from this, so it must be reachable from the phone. |
+
+Start-up fails with a list of anything missing rather than erroring obscurely
+later.
+
+## Architecture
+
+Four collaborators, wired together by `index.js`. Each speaks to exactly one
+outside thing, and the pure logic they sit on is separated out so it can be
+tested without a handset.
+
+```
+src/
+  index.js              wiring and shutdown
+  config.js             environment -> validated config
+
+  cisco/                things that speak to the phone
+    phone-api.js        the handset's CGI/Execute interface
+    xml.js              CiscoIPPhone* document builders (pure)
+
+  discord/
+    client.js           login, and the directory the phone browses
+    voice.js            joining, leaving, and per-speaker audio
+
+  audio/
+    bridge.js           coordinator between the two directions
+    mixer.js            additive mixing of several speakers (pure)
+    g711.js             mu-law codec and 8k <-> 48k resampling (pure)
+    rtp-receiver.js     phone -> bridge (G.711 in)
+    rtp-streamer.js     bridge -> phone (G.711 out)
+    rtp-packet.js       RFC 3550 header construction (pure)
+
+  http/                 the menus the phone renders
+    xml-service.js      assembles the app, owns its lifecycle
+    session.js          the one call that can be in progress
+    urls.js             every route the phone can be sent to
+    pagination.js       slicing lists into pages a phone can show (pure)
+    pages.js            shared renderings and error handling
+    routes/
+      browse.js         /menu /dms /servers /server-channels /preview
+      call.js           /join /connected /stopped
+      status.js         /status
+```
+
+Two rules hold this together:
+
+- **`http/` never builds XML and never touches discord.js.** Routes assemble
+  data and hand it to `cisco/xml.js`; every Discord method returns plain
+  objects. Escaping happens once, inside the builders.
+- **`audio/` knows nothing about Discord or HTTP.** It receives PCM and emits
+  PCM; who is speaking is just a string key to the mixer.
+
+### Audio path
+
+The phone streams G.711 mu-law to `rtp-receiver`, which strips the RTP header,
+decodes to 8 kHz PCM and upsamples to 48 kHz. `bridge` re-frames that to whole
+960-sample frames, Opus-encodes it, and Discord plays the result.
+
+Coming back, each Discord speaker is decoded to PCM separately and queued in
+`mixer`. Every 20 ms the mixer sums whoever has a full frame -- a phone call
+carries one mono stream, so simultaneous speakers have to be combined -- and
+`rtp-streamer` resamples to 8 kHz mu-law through FFmpeg, wraps each 20 ms in an
+RTP header, and paces it out to the handset.
+
+The RTP framing is written by hand rather than delegated to FFmpeg's `-f rtp`,
+which gives up control of the send cadence. A handset notices a burst.
+
+## Tests
+
+```sh
+npm test
+```
+
+Covers what can be checked without hardware: the mu-law tables, mixing and
+clipping, RTP framing and field wraparound, paging, XML escaping, and a pass
+over every HTTP route with Discord and the phone stubbed out. The RTP, Opus and
+Discord transports themselves need a real handset and a real account.
+
+## Network Requirements
+- Bridge and phone must be on the same LAN or have proper port forwarding
+- UDP port (default 20480) open between phone and bridge
+- TCP port 8080 open for XML service
+
+## Legal & ToS Warning
+- **Discord self-bots are against Discord ToS.**
+- Use at your own risk. For personal/proof-of-concept use only.
+
+## Troubleshooting
+
+- **Phone shows "Host not found."** The service URL is not reachable from the
+  handset. `HTTP_PUBLIC_URL` must be an address the phone can resolve, not
+  `localhost` or `0.0.0.0`.
+- **Menus load but no audio.** The phone has to send first, since its return
+  address is discovered from the source of its own RTP. Check UDP
+  `RTP_LISTEN_PORT` is open in both directions.
+- **`startMedia` fails.** Phone HTTP credentials, or firmware below 10.3(2).
+- **Names look mangled on the phone.** Expected: the display is ASCII only, so
+  non-ASCII characters are stripped and rows are clamped to 14 characters.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+
